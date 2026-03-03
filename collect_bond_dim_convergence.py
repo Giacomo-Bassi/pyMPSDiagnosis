@@ -172,7 +172,8 @@ def plot_max_trunc_convergence(conv_h5, savepath, plot_name='max_trunc_convergen
     fig, ax = plt.subplots(figsize=(7, 4))
     for bi, (bdim, color) in enumerate(zip(bond_dims, colors)):
         y = max_trunc[:, bi]
-        valid = np.isfinite(y) & (y > 0)
+        with np.errstate(invalid='ignore'):
+            valid = np.isfinite(y) & (y > 0)
         ax.semilogy(x[valid], y[valid], marker='o', markersize=5, linewidth=1.4,
                     color=color, label=f'm = {bdim}')
 
