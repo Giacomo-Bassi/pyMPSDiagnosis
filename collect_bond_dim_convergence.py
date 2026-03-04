@@ -59,6 +59,15 @@ def max_truncation_per_sweep(data, n_sweeps):
             result[col] = valid.max()
     return result
 
+def sum_truncation_per_sweep(data, n_sweeps):
+    """Return array of shape (n_sweeps,) with the sum of truncated weights per sweep."""
+    result = np.full(n_sweeps, np.nan)
+    for col in range(n_sweeps):
+        vals = data[:, col]
+        valid = vals[np.isfinite(vals)]
+        if len(valid) > 0:
+            result[col] = valid.sum()
+    return result
 
 def extract_bond_dim(filepath):
     """Extract bond dimension from a path containing '_m{N}_'."""
@@ -76,17 +85,18 @@ def extract_bond_dim(filepath):
 # ---------------------------------------------------------------------------
 
 def collect(h5_files, bond_dims, output):
-    records = []   # list of (bond_dim, sweep_nums, energies_arr, max_trunc_arr)
+    records = []   # list of (bond_dim, sweep_nums, energies_arr, max_trunc_arr, sum_trunc_arr)
 
     for path, bdim in zip(h5_files, bond_dims):
         data, _, sweep_nums, energies = load_h5(path)
         n_sweeps = len(sweep_nums)
         max_trunc = max_truncation_per_sweep(data, n_sweeps)
+        sum_trunc = sum_truncation_per_sweep(data, n_sweeps)
         energies_arr = np.array(energies, dtype=float)
-        records.append((bdim, sweep_nums, energies_arr, max_trunc))
+        records.append((bdim, sweep_nums, energies_arr, max_trunc, sum_trunc))
 
     # Union of all sweep numbers, sorted
-    all_sweeps = sorted({s for _, sw, _, _ in records for s in sw})
+    all_sweeps = sorted({s for _, sw, _, _, _ in records for s in sw})
     all_bdims  = sorted({bd for bd, *_ in records})
 
     n_sweeps = len(all_sweeps)
@@ -97,22 +107,25 @@ def collect(h5_files, bond_dims, output):
 
     energy_matrix    = np.full((n_sweeps, n_bdims), np.nan)
     max_trunc_matrix = np.full((n_sweeps, n_bdims), np.nan)
+    sum_trunc_matrix = np.full((n_sweeps, n_bdims), np.nan)
 
-    for bdim, sweep_nums, energies_arr, max_trunc in records:
+    for bdim, sweep_nums, energies_arr, max_trunc, sum_trunc in records:
         bi = bdim_idx[bdim]
         for k, s in enumerate(sweep_nums):
             si = sweep_idx[s]
             energy_matrix[si, bi]    = energies_arr[k]
             max_trunc_matrix[si, bi] = max_trunc[k]
+            sum_trunc_matrix[si, bi] = sum_trunc[k]
 
     with h5py.File(output, 'w') as f:
         f.create_dataset('sweep_numbers',          data=np.array(all_sweeps, dtype=int))
         f.create_dataset('bond_dimensions',        data=np.array(all_bdims,  dtype=int))
         f.create_dataset('sweep_energies',         data=energy_matrix)
         f.create_dataset('max_truncated_weight',   data=max_trunc_matrix)
+        f.create_dataset('sum_truncated_weight',   data=sum_trunc_matrix)
         f.attrs['description'] = (
             'DMRG convergence data: rows=sweeps, cols=bond_dimensions. '
-            'Datasets: sweep_energies, max_truncated_weight.'
+            'Datasets: sweep_energies, max_truncated_weight, sum_truncated_weight.'
         )
         f.attrs['sweep_numbers_info'] = 'shape (n_sweeps,)'
         f.attrs['bond_dimensions_info'] = 'shape (n_bdims,)'
@@ -134,12 +147,13 @@ def load_convergence_h5(filepath):
         bond_dims  = f['bond_dimensions'][:].tolist()
         energies   = f['sweep_energies'][:]
         max_trunc  = f['max_truncated_weight'][:]
-    return sweep_nums, bond_dims, energies, max_trunc
+        sum_trunc  = f['sum_truncated_weight'][:]
+    return sweep_nums, bond_dims, energies, max_trunc, sum_trunc
 
 
 def plot_energy_convergence(conv_h5, savepath, plot_name='energy_convergence.png'):
     """x = sweep number, y = energy, one line per bond dimension."""
-    sweep_nums, bond_dims, energies, _ = load_convergence_h5(conv_h5)
+    sweep_nums, bond_dims, energies, _, _ = load_convergence_h5(conv_h5)
     x = np.array(sweep_nums)
     colors = cm.viridis(np.linspace(0, 1, len(bond_dims)))
 
@@ -165,7 +179,7 @@ def plot_energy_convergence(conv_h5, savepath, plot_name='energy_convergence.png
 
 def plot_max_trunc_convergence(conv_h5, savepath, plot_name='max_trunc_convergence.png'):
     """x = sweep number, y = max truncated weight (log scale), one line per bond dimension."""
-    sweep_nums, bond_dims, _, max_trunc = load_convergence_h5(conv_h5)
+    sweep_nums, bond_dims, _, max_trunc, _ = load_convergence_h5(conv_h5)
     x = np.array(sweep_nums)
     colors = cm.viridis(np.linspace(0, 1, len(bond_dims)))
 
@@ -189,6 +203,95 @@ def plot_max_trunc_convergence(conv_h5, savepath, plot_name='max_trunc_convergen
     fig.savefig(out, dpi=150, bbox_inches='tight')
     print(f"Saved figure to {out}")
 
+def plot_sum_trunc_convergence(conv_h5, savepath, plot_name='sum_trunc_convergence.png'):
+    """x = sweep number, y = sum of truncated weights (log scale), one line per bond dimension."""
+    sweep_nums, bond_dims, _, _, sum_trunc = load_convergence_h5(conv_h5)
+    x = np.array(sweep_nums)
+    colors = cm.viridis(np.linspace(0, 1, len(bond_dims)))
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for bi, (bdim, color) in enumerate(zip(bond_dims, colors)):
+        y = sum_trunc[:, bi]
+        with np.errstate(invalid='ignore'):
+            valid = np.isfinite(y) & (y > 0)
+        ax.semilogy(x[valid], y[valid], marker='o', markersize=5, linewidth=1.4,
+                    color=color, label=f'm = {bdim}')
+
+    ax.set_xlabel('Sweep')
+    ax.set_ylabel('Sum of truncated weights')
+    ax.set_title('Sum of truncated weights convergence vs bond dimension')
+    ax.set_xticks(x)
+    ax.legend(fontsize=9)
+    ax.grid(True, which='both', linestyle='--', alpha=0.4)
+    fig.tight_layout()
+
+    out = os.path.join(savepath, plot_name)
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    print(f"Saved figure to {out}")
+
+def plot_sum_trunc_vs_energy(conv_h5, savepath, plot_name='sum_trunc_vs_energy.png'):
+    """x = sum of truncated weights (log scale), y = |E - E_min| (log scale), one point per sweep colored by bond dimension."""
+    sweep_nums, bond_dims, energies, _, sum_trunc = load_convergence_h5(conv_h5)
+    colors = cm.viridis(np.linspace(0, 1, len(bond_dims)))
+    e_min = np.nanmin(energies)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for bi, (bdim, color) in enumerate(zip(bond_dims, colors)):
+        x = sum_trunc[:, bi]
+        y = np.abs(energies[:, bi] - e_min)
+        with np.errstate(invalid='ignore'):
+            valid = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+        ax.loglog(x[valid], y[valid], marker='o', markersize=5,
+                  linestyle='None', color=color, label=f'm = {bdim}')
+        valid_idx = np.where(valid)[0]
+        if len(valid_idx) > 0:
+            last = valid_idx[-1]
+            ax.loglog(x[last], y[last], marker='o', markersize=11,
+                      linestyle='None', markerfacecolor='none',
+                      markeredgecolor='red', markeredgewidth=1.5)
+
+    ax.set_xlabel('Sum of truncated weights')
+    ax.set_ylabel('|E - E$_{min}$|')
+    ax.set_title('|E - E$_{min}$| vs sum of truncated weights colored by bond dimension')
+    ax.legend(fontsize=9)
+    ax.grid(True, which='both', linestyle='--', alpha=0.4)
+    fig.tight_layout()
+
+    out = os.path.join(savepath, plot_name)
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    print(f"Saved figure to {out}")
+
+def plot_max_trunc_vs_energy(conv_h5, savepath, plot_name='max_trunc_vs_energy.png'):
+    """x = max truncated weight (log scale), y = |E - E_min| (log scale), one point per sweep colored by bond dimension."""
+    sweep_nums, bond_dims, energies, max_trunc, _ = load_convergence_h5(conv_h5)
+    colors = cm.viridis(np.linspace(0, 1, len(bond_dims)))
+    e_min = np.nanmin(energies)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for bi, (bdim, color) in enumerate(zip(bond_dims, colors)):
+        x = max_trunc[:, bi]
+        y = np.abs(energies[:, bi] - e_min)
+        with np.errstate(invalid='ignore'):
+            valid = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+        ax.loglog(x[valid], y[valid], marker='o', markersize=5,
+                  linestyle='None', color=color, label=f'm = {bdim}')
+        valid_idx = np.where(valid)[0]
+        if len(valid_idx) > 0:
+            last = valid_idx[-1]
+            ax.loglog(x[last], y[last], marker='o', markersize=11,
+                      linestyle='None', markerfacecolor='none',
+                      markeredgecolor='red', markeredgewidth=1.5)
+
+    ax.set_xlabel('Max truncated weight')
+    ax.set_ylabel('|E - E$_{min}$|')
+    ax.set_title('|E - E$_{min}$| vs max truncated weight colored by bond dimension')
+    ax.legend(fontsize=9)
+    ax.grid(True, which='both', linestyle='--', alpha=0.4)
+    fig.tight_layout()
+
+    out = os.path.join(savepath, plot_name)
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    print(f"Saved figure to {out}")
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -226,6 +329,16 @@ if __name__ == '__main__':
     plot_energy_convergence(
         args.output, savepath,
         plot_name=f'{args.plot_root}_energy.png')
-    plot_max_trunc_convergence(
+    # plot_max_trunc_convergence(
+    #     args.output, savepath,
+    #     plot_name=f'{args.plot_root}_max_trunc.png')
+    plot_sum_trunc_convergence(
         args.output, savepath,
-        plot_name=f'{args.plot_root}_max_trunc.png')
+        plot_name=f'{args.plot_root}_sum_trunc.png')
+    plot_sum_trunc_vs_energy(
+        args.output, savepath,
+        plot_name=f'{args.plot_root}_sum_trunc_vs_energy.png')
+    # plot_max_trunc_vs_energy(
+    #     args.output, savepath,
+    #     plot_name=f'{args.plot_root}_max_trunc_vs_energy.png')
+
